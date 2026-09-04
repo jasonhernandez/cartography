@@ -23,6 +23,11 @@ from cartography.util import timeit
 
 logger = logging.getLogger(__name__)
 
+# A key can be deleted between ListKeys and the per-key calls below, so treat
+# NotFoundException like a key we aren't allowed to read: skip it, don't fail
+# the whole account sync.
+SKIPPABLE_KEY_ERROR_CODES = ("AccessDeniedException", "NotFoundException")
+
 
 @timeit
 @aws_handle_regions
@@ -77,10 +82,11 @@ def get_policy(key: Dict, client: botocore.client.BaseClient) -> Any:
     try:
         policy = client.get_key_policy(KeyId=key["KeyId"], PolicyName="default")
     except ClientError as e:
-        if e.response["Error"]["Code"] == "AccessDeniedException":
+        code = e.response["Error"]["Code"]
+        if code in SKIPPABLE_KEY_ERROR_CODES:
             policy = None
             logger.warning(
-                f"kms:get_key_policy on key id {key['KeyId']} failed with AccessDeniedException; continuing sync.",
+                f"kms:get_key_policy on key id {key['KeyId']} failed with {code}; continuing sync.",
                 exc_info=True,
             )
         else:
@@ -96,8 +102,18 @@ def get_aliases(key: Dict, client: botocore.client.BaseClient) -> List[Any]:
     """
     aliases: List[Any] = []
     paginator = client.get_paginator("list_aliases")
-    for page in paginator.paginate(KeyId=key["KeyId"]):
-        aliases.extend(page["Aliases"])
+    try:
+        for page in paginator.paginate(KeyId=key["KeyId"]):
+            aliases.extend(page["Aliases"])
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code in SKIPPABLE_KEY_ERROR_CODES:
+            logger.warning(
+                f"kms:list_aliases on key id {key['KeyId']} failed with {code}; continuing sync.",
+                exc_info=True,
+            )
+        else:
+            raise
 
     return aliases
 
@@ -113,9 +129,10 @@ def get_grants(key: Dict, client: botocore.client.BaseClient) -> List[Any]:
         for page in paginator.paginate(KeyId=key["KeyId"]):
             grants.extend(page["Grants"])
     except ClientError as e:
-        if e.response["Error"]["Code"] == "AccessDeniedException":
+        code = e.response["Error"]["Code"]
+        if code in SKIPPABLE_KEY_ERROR_CODES:
             logger.warning(
-                f'kms:list_grants on key_id {key["KeyId"]} failed with AccessDeniedException; continuing sync.',
+                f'kms:list_grants on key_id {key["KeyId"]} failed with {code}; continuing sync.',
                 exc_info=True,
             )
         else:
